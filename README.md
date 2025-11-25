@@ -361,33 +361,6 @@ services:
     restart: always
 ```
 
-#### `main.py`
-
-```python
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse # <--- 1. IMPORTANTE: Importar esto
-
-app = FastAPI()
-
-@app.get("/")
-def procesar_y_redirigir(ip: str = None, port: int = None, name: str = None):
-
-    # Si recibimos IP y Puerto, hacemos la redirección
-    if port:
-        if not ip:
-            ip = "theblockheads.me"
-        if not name:
-            name = f"Server {port}"
-
-
-        url = f"blockheads://join?ip={ip}&port={port}&name={name}"
-        print(f"🚀 REDIRECCIONANDO A: {url}", flush=True)
-        return RedirectResponse(url=url)
-
-    # Si no hay datos, mostramos el mensaje de siempre
-    return {"mensaje": "Error, need more parameters"}
-```
-
 -----
 
 ### 🕸️ Website (Legacy Static Site)
