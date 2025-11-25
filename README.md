@@ -61,7 +61,7 @@ Keys: Generate using `wg genkey | tee privatekey | wg pubkey > publickey`
 
 #### `scripts/rules.sh`
 
-> **English Explanation:** This script manages IPTables. It accepts `up` or `down` and the interface name (`wg0` or `wg1`). It automatically applies NAT (Masquerade) to allow internet access and reads the `/zones/` folder to apply port forwarding rules (DNAT) dynamically.
+> This script manages IPTables. It accepts `up` or `down` and the interface name (`wg0` or `wg1`). It automatically applies NAT (Masquerade) to allow internet access and reads the `/zones/` folder to apply port forwarding rules (DNAT) dynamically.
 
 ```bash
 #!/bin/bash
@@ -138,7 +138,7 @@ fi
 
 #### `wg0.conf` (Legacy)
 
-> **English Explanation:** Standard WireGuard config using IP range `12.0.0.1`. It calls the `rules.sh` script on startup/shutdown.
+> Standard WireGuard config using IP range `12.0.0.1`. It calls the `rules.sh` script on startup/shutdown.
 
 ```ini
 [Interface]
@@ -207,7 +207,7 @@ AllowedIPs = 10.0.100.2/32, 10.0.200.0/24
 
 #### `zones/wg0/ptero.conf`
 
-> **English Explanation:** Defines variable for the firewall script. Points ports 25565-25999 to the specific internal IP.
+> Defines variable for the firewall script. Points ports 25565-25999 to the specific internal IP.
 
 ```bash
 # Configuración para Pterodactyl
