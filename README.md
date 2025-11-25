@@ -66,73 +66,68 @@ Keys: Generate using `wg genkey | tee privatekey | wg pubkey > publickey`
 ```bash
 #!/bin/bash
 
-# --- CONFIGURACIÓN GLOBAL ---
-INT_PUB="ens6"    # Tu interfaz de internet (No cambia)
-ACTION=$1         # "up" o "down"
-INT_VPN=$2        # ¡NUEVO! Recibe "wg0" o "wg1" como segundo argumento
+# --- PARAMETROS AUTOMÁTICOS ---
+ACTION=$1                   # "up" o "down"
+INTERFACE=$2                # "wg1" (pasado por WireGuard)
+ZONE_DIR="/etc/wireguard/zones/$INTERFACE"
 
-# Verificación de seguridad
-if [ -z "$INT_VPN" ]; then
-    echo "Error: Debes especificar la interfaz. Ejemplo: $0 up wg0"
-    exit 1
+# Validación
+if [ -z "$INTERFACE" ]; then
+    echo "❌ Error: Falta interfaz. Uso: $0 {up|down} wg1"
+    exit 1
 fi
 
-# Definir si añadimos (-A) o borramos (-D) reglas
 if [ "$ACTION" == "up" ]; then
-    OP="-A"
-    NAT_OP="-A"
-    echo "[Script] ($INT_VPN) Aplicando reglas de firewall..."
+    echo "🚀 [VPS] Iniciando Firewall Dinámico para $INTERFACE..."
+
+    # 1. PREPARACIÓN DEL SISTEMA
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null
+
+    # Limpieza de tablas NAT para evitar conflictos o duplicados
+    iptables -t nat -F PREROUTING
+    iptables -t nat -F POSTROUTING
+
+    # 2. REGLA MAESTRA DE RETORNO (MASQUERADE)
+    # Fundamental para que el tráfico sepa volver por el túnel
+    iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE
+
+    # 3. CARGA DINÁMICA DE ZONAS (.conf)
+    if [ -d "$ZONE_DIR" ]; then
+        # Buscamos cualquier archivo .conf en /etc/wireguard/zones/wg1/
+        for CONFIG_FILE in "$ZONE_DIR"/*.conf; do
+            [ -e "$CONFIG_FILE" ] || continue # Si no hay archivos, salta
+
+            # Leemos las variables del archivo (IP_DEST, TCP_PORTS, UDP_PORTS)
+            source "$CONFIG_FILE"
+
+            echo "   📂 Cargando: $(basename "$CONFIG_FILE") -> Destino: $IP_DEST"
+
+            # --- APLICAR REGLAS TCP ---
+            # El bucle 'for' separa por espacios. IPTables entiende los rangos (:) nativamente.
+            if [ ! -z "$TCP_PORTS" ]; then
+                for PORT in $TCP_PORTS; do
+                    iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $IP_DEST
+                done
+            fi
+
+            # --- APLICAR REGLAS UDP ---
+            if [ ! -z "$UDP_PORTS" ]; then
+                for PORT in $UDP_PORTS; do
+                    iptables -t nat -A PREROUTING -p udp --dport $PORT -j DNAT --to-destination $IP_DEST
+                done
+            fi
+        done
+    else
+        echo "   ⚠️ No existe el directorio de zonas: $ZONE_DIR"
+    fi
+    echo "✅ Reglas aplicadas."
+
 elif [ "$ACTION" == "down" ]; then
-    OP="-D"
-    NAT_OP="-D"
-    echo "[Script] ($INT_VPN) Eliminando reglas de firewall..."
-else
-    echo "Uso: $0 {up|down} {interfaz}"
-    exit 1
-fi
-
-# ---------------------------------------------------------
-# 1. REGLAS BASE (Globales para esta interfaz)
-# ---------------------------------------------------------
-
-# Masquerade Salida (Internet) - Opcional: IPtables suele ser listo y no duplica si ya existe
-iptables -t nat $NAT_OP POSTROUTING -o $INT_PUB -j MASQUERADE
-
-# Masquerade Retorno (Específico para la interfaz actual)
-iptables -t nat $NAT_OP POSTROUTING -o $INT_VPN -j MASQUERADE
-
-# Forwarding (Permitir paso para la interfaz actual)
-iptables $OP FORWARD -i $INT_VPN -j ACCEPT
-iptables $OP FORWARD -i $INT_PUB -o $INT_VPN -j ACCEPT
-
-# ---------------------------------------------------------
-# 2. BUCLE DE ZONAS (Dinámico por carpeta)
-# ---------------------------------------------------------
-
-# AHORA BUSCAMOS EN UNA SUBCARPETA CON EL NOMBRE DE LA INTERFAZ
-# Ejemplo: /etc/wireguard/zones/wg0/*.conf  o  /etc/wireguard/zones/wg1/*.conf
-
-ZONE_DIR="/etc/wireguard/zones/$INT_VPN"
-
-if [ -d "$ZONE_DIR" ]; then
-    for ZONE_FILE in "$ZONE_DIR"/*.conf; do
-        [ -e "$ZONE_FILE" ] || continue
-
-        source "$ZONE_FILE"
-        echo "Procesando zona ($INT_VPN): $ZONE_FILE -> IP: $IP_DEST"
-
-        # Aplicar reglas TCP
-        for PORT in $TCP_PORTS; do
-            iptables -t nat $NAT_OP PREROUTING -p tcp -i $INT_PUB --dport $PORT -j DNAT --to-destination $IP_DEST
-        done
-
-        # Aplicar reglas UDP
-        for PORT in $UDP_PORTS; do
-            iptables -t nat $NAT_OP PREROUTING -p udp -i $INT_PUB --dport $PORT -j DNAT --to-destination $IP_DEST
-        done
-    done
-else
-    echo "[Info] No existe carpeta de zonas para $INT_VPN, saltando DNAT."
+    echo "🛑 [VPS] Deteniendo Firewall..."
+    # Limpieza total al apagar
+    iptables -t nat -F PREROUTING
+    iptables -t nat -F POSTROUTING
+    echo "✅ Reglas eliminadas."
 fi
 ```
 
