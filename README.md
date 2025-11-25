@@ -2,7 +2,7 @@
 
 ## 🧠 The New Networking Logic
 
-<img width="5504" height="2847" alt="NETWORK(2)" src="https://github.com/user-attachments/assets/dbe37bd2-a2c8-4ef6-a2b8-0e81af8a7eb6" />
+<img width="5504" height="2847" alt="Network" src="https://github.com/user-attachments/assets/dbe37bd2-a2c8-4ef6-a2b8-0e81af8a7eb6" />
 
 
 In this new configuration, the architecture shifts from a "Mesh" style (where every VM connects individually to the VPS) to a **"Hub-and-Spoke" / Site-to-Site** model managed by Unraid.
