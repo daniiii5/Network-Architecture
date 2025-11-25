@@ -1,465 +1,322 @@
-# 🌐 Network Architecture Overhaul
+# 🌐 Deep Dive: Network Infrastructure Documentation
 
-## 🧠 The New Networking Logic
+<img width="5461" height="2847" alt="NETWORK(3)" src="https://github.com/user-attachments/assets/f42f9fa5-165c-44dc-a596-1426bde0db7c" />
 
-<img width="5504" height="2847" alt="Network" src="https://github.com/user-attachments/assets/dbe37bd2-a2c8-4ef6-a2b8-0e81af8a7eb6" />
+## 🧠 Logical Architecture: "Hub-and-Spoke"
 
+The infrastructure has evolved from a "Mesh" model (where every Virtual Machine connected individually to the VPS) to a centralized **Hub-and-Spoke** model.
 
-In this new configuration, the architecture shifts from a "Mesh" style (where every VM connects individually to the VPS) to a **"Hub-and-Spoke" / Site-to-Site** model managed by Unraid.
+  * **The Hub:** Unraid acts as the central router for your home network services.
+  * **The Spoke:** The VPS acts as the public entry point.
+  * **The Endpoint:** The VMs sit behind Unraid, isolated from the public internet, only receiving traffic forwarded explicitly through the tunnel.
 
-**How it works now:**
+### Detailed Traffic Flow (The Life of a Packet)
 
-1.  **Isolation:** The VMs (like `Paymenter`) no longer communicate directly with your physical home router (`192.168.1.1`) for their public service traffic.
-2.  **The Bridge:** They are connected to a virtual internal network on Unraid (likely `virbr0` or a custom Docker network) with the range `10.0.200.0/24`.
-3.  **The Gateway (Unraid):** Unraid acts as the **Gateway**. It has an IP of `10.0.200.1` on this internal network.
-4.  **The Tunnel:** Unraid maintains a *single* WireGuard connection (`wg1`) to the VPS (Strato).
-5.  **The Flow:**
-      * VM sends data to Unraid (`10.0.200.1`).
-      * Unraid forwards that traffic through the WireGuard tunnel (`10.0.100.2` -\> `10.0.100.1`).
-      * The VPS receives it and routes it to the public Internet using its Public IP (`87.106...`).
+To understand *why* the configurations below are necessary, we must follow a single game packet (e.g., a Minecraft login) from the internet to the server and back.
 
-**Benefits:**
-
-  * **Cleaner:** You only manage one VPN connection on the Unraid host, not one per VM.
-  * **Secure:** VMs are isolated behind Unraid.
-  * **Efficient:** Traffic bypasses the home router's NAT table for these services.
+1.  **Entry (The Handshake):** A player connects to the VPS Public IP (`87.106...`) on port `25565`.
+2.  **The VPS Tunnel (DNAT & SNAT):**
+      * The VPS Firewall (`rules.sh`) intercepts this packet.
+      * **Destination Change:** It changes the destination from itself to the VM IP (`10.0.200.2`).
+      * **Source Change (Masquerade):** Crucially, it changes the "Sender" IP to its own VPN IP (`10.0.100.1`). *Why? So that when the game server replies, it replies to the Tunnel, not to the player's random IP directly.*
+      * The packet is pushed through WireGuard interface `wg1`.
+3.  **The Routing Bridge (Unraid):**
+      * Unraid receives the packet on `10.0.100.2`.
+      * It sees the packet is destined for `10.0.200.2`. Unraid knows this IP lives on its virtual bridge (`virbr0`).
+      * **Forwarding:** The IPTables rules allow the packet to cross from the VPN interface to the Virtual Machine interface.
+4.  **The Docker Trick (The VM):**
+      * The VM receives the packet. Normally, Docker blocks external traffic on custom bridges.
+      * The `fix_ptero.sh` script intercepts the packet before Docker sees it.
+      * It rewrites the packet to look like it is coming from `localhost` (`127.0.0.1`).
+      * Docker accepts the connection because it trusts "local" traffic.
 
 -----
 
-# 📂 Configuration & Files
+## ☁️ Node 1: VPS (Strato)
 
-## ☁️ System 1: VPS (Strato)
+**Role:** Public Gateway & Central Firewall
 
-*The Public Gateway*
+The VPS is the "Face" of the network. It protects your home IP (DDoS protection) and standardizes access. It runs WireGuard to create a secure, encrypted extension of your local network over the internet.
 
-### 🛡️ WireGuard & Firewall
-
-To install: `sudo apt install wireguard`
-Keys: Generate using `wg genkey | tee privatekey | wg pubkey > publickey`
-
-#### 📂 File Structure
+### 📂 File Structure
 
 ```text
-.
-├── scripts
-│   └── rules.sh          # 🔥 Dynamic Firewall Script
-├── wg0                   # 👴 Legacy Network (Direct VM connections)
-│   ├── privatekey
-│   └── publickey
-├── wg0.conf
-├── wg1                   # 🆕 New Network (Unraid Tunnel)
-│   ├── privatekey
-│   └── publickey
-├── wg1.conf
-└── zones                 # 🚦 Port Forwarding Rules
-    ├── wg0
-    │   ├── paymenter.conf
-    │   ├── ptero.conf
-    │   └── pyro.conf
-    └── wg1
+/etc/wireguard/
+├── scripts/
+│   └── rules.sh          # ⚙️ Dynamic Firewall Engine (The Logic)
+├── zones/
+│   └── wg1/              # 🚦 Zone Definitions (The Data)
+│       └── ptero.conf    # Specific ports for Pterodactyl
+├── wg1.conf              # Unraid Tunnel Config
+└── wg0.conf              # Legacy Config (Deprecated or secondary)
 ```
 
-#### `scripts/rules.sh`
+### ⚙️ Critical Configurations
 
-> This script manages IPTables. It accepts `up` or `down` and the interface name (`wg0` or `wg1`). It automatically applies NAT (Masquerade) to allow internet access and reads the `/zones/` folder to apply port forwarding rules (DNAT) dynamically.
+#### 1\. `wg1.conf` (Main Tunnel)
+
+This file configures the WireGuard interface. The `PostUp` and `PostDown` lines are the "hooks" that turn the VPN into a router by launching our firewall script.
+
+```ini
+[Interface]
+Address = 10.0.100.1/24
+ListenPort = 51821
+PrivateKey = <Private_Key_VPS>
+
+# --- FIREWALL MANAGEMENT ---
+# When the tunnel starts, run the script with "up". When it stops, run "down".
+# %i is a variable that is automatically replaced by the interface name (wg1).
+PostUp = /etc/wireguard/scripts/rules.sh up %i
+PostDown = /etc/wireguard/scripts/rules.sh down %i
+
+[Peer]
+# Client: Unraid Server
+PublicKey = <Public_Key_Unraid>
+PresharedKey = <Preshared_Key>
+# AllowedIPs acts as a routing table.
+# It tells the VPS: "Send traffic for the Tunnel IP (100.2) AND the VM Subnet (200.0/24) through this peer."
+AllowedIPs = 10.0.100.2/32, 10.0.200.0/24
+```
+
+#### 2\. `scripts/rules.sh` (Master Script)
+
+This is a robust, modular firewall script. Instead of hardcoding ports, it reads external files. This prevents syntax errors in the main script from breaking the network.
+
+  * **`sysctl ... ip_forward`**: Tells the Linux kernel to allow passing packets between interfaces (Router mode).
+  * **`MASQUERADE`**: The most critical rule. It ensures that traffic leaving the tunnel looks like it comes from the VPS. Without this, return traffic would get lost.
+
+<!-- end list -->
 
 ```bash
 #!/bin/bash
+# Location: /etc/wireguard/scripts/rules.sh
 
-# --- PARAMETROS AUTOMÁTICOS ---
-ACTION=$1                   # "up" o "down"
-INTERFACE=$2                # "wg1" (pasado por WireGuard)
+ACTION=$1                   # "up" or "down"
+INTERFACE=$2                # "wg1"
 ZONE_DIR="/etc/wireguard/zones/$INTERFACE"
 
-# Validación
-if [ -z "$INTERFACE" ]; then
-    echo "❌ Error: Falta interfaz. Uso: $0 {up|down} wg1"
-    exit 1
-fi
+if [ -z "$INTERFACE" ]; then echo "❌ Error: Missing interface"; exit 1; fi
 
 if [ "$ACTION" == "up" ]; then
-    echo "🚀 [VPS] Iniciando Firewall Dinámico para $INTERFACE..."
-
-    # 1. PREPARACIÓN DEL SISTEMA
+    echo "🚀 [VPS] Starting Dynamic Firewall for $INTERFACE..."
+    
+    # Enable the Kernel's ability to forward packets
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
 
-    # Limpieza de tablas NAT para evitar conflictos o duplicados
+    # Preventive Cleanup: Clear old NAT rules to avoid duplicates
     iptables -t nat -F PREROUTING
     iptables -t nat -F POSTROUTING
 
-    # 2. REGLA MAESTRA DE RETORNO (MASQUERADE)
-    # Fundamental para que el tráfico sepa volver por el túnel
+    # 1. MASTER RETURN RULE (MASQUERADE) - CRITICAL
+    # "Any packet leaving via wg1 must bear my IP address as the source."
     iptables -t nat -A POSTROUTING -o $INTERFACE -j MASQUERADE
 
-    # 3. CARGA DINÁMICA DE ZONAS (.conf)
+    # 2. DYNAMIC ZONE LOADING
+    # Loops through every .conf file in the zones directory
     if [ -d "$ZONE_DIR" ]; then
-        # Buscamos cualquier archivo .conf en /etc/wireguard/zones/wg1/
         for CONFIG_FILE in "$ZONE_DIR"/*.conf; do
-            [ -e "$CONFIG_FILE" ] || continue # Si no hay archivos, salta
-
-            # Leemos las variables del archivo (IP_DEST, TCP_PORTS, UDP_PORTS)
+            [ -e "$CONFIG_FILE" ] || continue
             source "$CONFIG_FILE"
+            echo "   📂 Loading zone: $(basename "$CONFIG_FILE") -> $IP_DEST"
 
-            echo "   📂 Cargando: $(basename "$CONFIG_FILE") -> Destino: $IP_DEST"
-
-            # --- APLICAR REGLAS TCP ---
-            # El bucle 'for' separa por espacios. IPTables entiende los rangos (:) nativamente.
+            # Apply TCP Rules: Forwards external traffic to the internal VM IP
             if [ ! -z "$TCP_PORTS" ]; then
                 for PORT in $TCP_PORTS; do
                     iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $IP_DEST
                 done
             fi
-
-            # --- APLICAR REGLAS UDP ---
+            # Apply UDP Rules: Same as above, for UDP (Crucial for Minecraft/Voice)
             if [ ! -z "$UDP_PORTS" ]; then
                 for PORT in $UDP_PORTS; do
                     iptables -t nat -A PREROUTING -p udp --dport $PORT -j DNAT --to-destination $IP_DEST
                 done
             fi
         done
-    else
-        echo "   ⚠️ No existe el directorio de zonas: $ZONE_DIR"
     fi
-    echo "✅ Reglas aplicadas."
+    echo "✅ Rules applied."
 
 elif [ "$ACTION" == "down" ]; then
-    echo "🛑 [VPS] Deteniendo Firewall..."
-    # Limpieza total al apagar
+    echo "🛑 [VPS] Cleaning rules..."
     iptables -t nat -F PREROUTING
     iptables -t nat -F POSTROUTING
-    echo "✅ Reglas eliminadas."
 fi
 ```
 
-#### `wg0.conf` (Legacy)
+#### 3\. `zones/wg1/ptero.conf` (Port Definitions)
 
-> Standard WireGuard config using IP range `12.0.0.1`. It calls the `rules.sh` script on startup/shutdown.
-
-```ini
-[Interface]
-Address = 12.0.0.1/24
-ListenPort = 51820
-PrivateKey = PrivateKey
-
-# --- SISTEMA ELÁSTICO ---
-# 1. Activar kernel forwarding
-PostUp = sysctl -w net.ipv4.ip_forward=1
-
-# 2. Ejecutar el script maestro (UP)
-PostUp = /etc/wireguard/scripts/rules.sh up %i
-
-# 3. Ejecutar el script maestro (DOWN) - Limpieza automática
-PostDown = /etc/wireguard/scripts/rules.sh down %i
-
-[Peer]
-# Pterodactyl Backend
-PublicKey = PublicKey
-AllowedIPs = 12.0.1.1/32
-
-[Peer]
-# Pyrodactyl Backend
-PublicKey = PublicKey
-AllowedIPs = 12.0.1.2/32
-
-[Peer]
-# Pyrodactyl Backend
-PublicKey = PublicKey
-AllowedIPs = 12.0.1.3/32
-```
-
-#### `wg1.conf` (New Unraid Link)
-
->   * **Address:** `10.0.100.1` (The new private network for Unraid).
->   * **ListenPort:** `51821` (Different from wg0 to avoid conflicts).
->   * **AllowedIPs:** Includes `10.0.200.0/24` — this is crucial. It tells the VPS that to reach the VMs (like Paymenter), it must send traffic through this peer (Unraid).
-
-```ini
-[Interface]
-# Esta es la IP del VPS en la NUEVA red exclusiva para Unraid
-Address = 10.0.100.1/24
-
-# ¡IMPORTANTE! Cambiamos el puerto al 51821 para no chocar con el wg0
-ListenPort = 51821
-
-# Genera una PrivateKey NUEVA para este wg1 (comando: wg genkey)
-PrivateKey = PrivateKey
-
-# Scripts
-PostUp = sysctl -w net.ipv4.ip_forward=1
-# OJO: Asegúrate de que este script no tenga escrito "wg0" a fuego dentro.
-# Si es genérico, funcionará.
-PostUp = /etc/wireguard/scripts/rules.sh up %i
-PostDown = /etc/wireguard/scripts/rules.sh down %i
-
-[Peer]
-# Esta es la Public Key de tu Unraid (esa se mantiene igual)
-PublicKey = PublicKey
-PresharedKey = PresharedKey
-AllowedIPs = 10.0.100.2/32, 10.0.200.0/24
-```
-
-#### `zones/wg0/ptero.conf`
-
-> Defines variable for the firewall script. Points ports 25565-25999 to the specific internal IP.
+This file makes management easy. To add a port, you edit this file, not the complex script.
 
 ```bash
-# Configuración para Pterodactyl
-IP_DEST="12.0.1.1"
+# Destination: Pterodactyl VM on Unraid
+IP_DEST="10.0.200.2"
 
-# Lista de puertos TCP (separados por espacio)
-# Ejemplo: Rangos con dos puntos, puertos sueltos solos
+# Game Ports + SFTP
 TCP_PORTS="25565:25999 2022"
-
-# Lista de puertos UDP
 UDP_PORTS="25565:25999"
 ```
 
 -----
 
-### 🚦 Caddy Reverse Proxy
+## 🟠 Node 2: Unraid (The Hub)
 
-Handles SSL termination and subdomains.
+**Role:** Internal Router & VM Host
 
-#### 📂 File Structure
+Unraid is the physical machine hosting your infrastructure. It maintains the connection to the VPS and bridges that connection to your Virtual Machines using Linux bridging (`virbr0`).
 
-```text
-.
-├── conf
-│   └── Caddyfile
-├── docker-compose.yml
-├── restart.sh
-└── site
-```
+### 📂 WireGuard Config (`wg0.conf`)
 
-#### `conf/Caddyfile`
+*Note: Unraid names the interface `wg0` locally, but it connects to the VPS's `wg1`. This is normal.*
 
-> **Note:** Notice `billing.danicdn.tech` points to `10.0.200.3`. This traffic goes through the `wg1` tunnel to Unraid.
+The `PostUp` command here is a dense chain of commands that configures Unraid to act as a bridge.
 
-```text
-ptero.danicdn.tech {
-    reverse_proxy 12.0.1.1:80
-}
+1.  `sysctl ... ip_forward=1`: Activates router mode.
+2.  `iptables -I FORWARD ...`: These are "Permissions". By default, Linux might block traffic moving from VPN to VM. These rules explicitly allow it.
+3.  `MASQUERADE`: This ensures that when the VM replies to Unraid, Unraid knows how to handle the packet.
 
-wings.danicdn.tech:8080 {
-    reverse_proxy 12.0.1.1:8080
-}
-
-pyro.danicdn.tech {
-    reverse_proxy 12.0.1.2:80
-}
-
-daemon.danicdn.tech:8081 {
-    reverse_proxy 12.0.1.2:8081
-}
-
-daemon.danicdn.tech {
-    reverse_proxy 12.0.1.2:8081
-}
-
-theblockheads.me {
-    reverse_proxy localhost:15151
-}
-
-join.theblockheads.me {
-    reverse_proxy localhost:9924
-}
-
-billing.danicdn.tech {
-    reverse_proxy 10.0.200.3:80
-}
-
-status.danicdn.tech {
-    reverse_proxy localhost:3001
-}
-```
-
-#### `docker-compose.yml`
-
-```yaml
-services:
-  caddy:
-    image: caddy:latest
-    restart: unless-stopped
-    # --- CAMBIO CRÍTICO ---
-    # Usamos la red del host para que Caddy vea la interfaz WireGuard (12.0.0.1)
-    network_mode: host
-
-    # --- SECCIÓN ELIMINADA ---
-    # Al usar network_mode: host, no se mapean puertos.
-    # Caddy tomará el control directo de los puertos 80 y 443 de la máquina.
-    # ports:
-    #   - "80:80"
-    #   - "443:443"
-    #   - "443:443/udp"
-
-    volumes:
-      - ./conf:/etc/caddy
-      - ./site:/srv
-      - caddy_data:/data
-      - caddy_config:/config
-
-volumes:
-  caddy_data:
-  caddy_config:
-```
-
-#### `restart.sh`
-
-```bash
-docker compose exec -w /etc/caddy caddy caddy reload
-```
-
------
-
-### 🔀 Redirect Service (Python)
-
-A simple FastAPI app to redirect users to a custom URL scheme (`blockheads://`).
-
-#### 📂 File Structure
-
-```text
-.
-├── Dockerfile
-├── docker-compose.yml
-└── main.py
-```
-
-#### `Dockerfile`
-
-```dockerfile
-FROM python:3.14-slim
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-WORKDIR /app
-COPY . .
-RUN pip install --no-cache-dir fastapi uvicorn
-EXPOSE 9924
-# CMD ["python3", "-m", "http.server", "9924"]
-# CMD ["python3", "main.py"]
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9924"]
-```
-
-#### `docker-compose.yml`
-
-```yaml
-services:
-  web-server:
-    build: .
-    container_name: web-server
-    # ESTA ES LA PARTE CLAVE QUE PROBABLEMENTE FALTA:
-    network_mode: host
-    ports:
-      - "9924:9924"
-    volumes:
-      - .:/app
-    # Si el servidor falla, que se reinicie solo
-    restart: always
-```
-
------
-
-### 🕸️ Website (Legacy Static Site)
-
-A static site running on Nginx/Apache (implied by file structure) or Python.
-
-#### 📂 File Structure
-
-*(Summarized for brevity)*
-
-```text
-.
-├── Dockerfile
-├── docker-compose.yml
-├── index.html
-├── main.py
-├── start.sh
-└── (assets: css, js, img, fonts)
-```
-
------
-
-## 🟠 System 2: Unraid (The Hub)
-
-*The Home Server & VM Host*
-
-### 🔌 WireGuard Client
-
-Unraid connects to the VPS via `wg1`.
-
-#### 📂 File Structure
-
-```text
-.
-├── coredns
-│   └── Corefile
-├── server
-│   ├── privatekey-server
-│   └── publickey-server
-├── templates
-│   ├── peer.conf
-│   └── server.conf
-└── wg_confs
-    └── wg0.conf
-```
-
-#### `wg_confs/wg0.conf`
-
-> This is the client side configuration on Unraid.
->
->   * **PostUp Command:**
->     1.  `sysctl -w net.ipv4.ip_forward=1`: Enables the server to pass traffic from one interface to another.
->     2.  `iptables -I FORWARD 1 -i %i -o virbr0 -j ACCEPT`: Allows traffic coming **from** the VPN (`%i`) to go **to** the VM bridge (`virbr0`).
->     3.  `iptables -I FORWARD 1 -i virbr0 -o %i -j ACCEPT`: Allows traffic coming **from** the VMs to go **to** the VPN.
->     4.  `MASQUERADE`: Ensures traffic leaving via `eth0` is NATed (if strictly necessary for local access).
+<!-- end list -->
 
 ```ini
 [Interface]
 Address = 10.0.100.2/24
-PrivateKey = PrivateKey
+PrivateKey = <Private_Key_Unraid>
 ListenPort = 51821
 
-# --- REGLAS DE FIREWALL AUTOMÁTICAS ---
+# --- ADVANCED ROUTING ---
+# 1. Enable IP Forwarding
+# 2. Allow Traffic VPN (%i) -> VM Bridge (virbr0)
+# 3. Allow Traffic VM Bridge (virbr0) -> VPN (%i)
+# 4. Masquerade return traffic (Ensures routing stability)
+PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -I FORWARD 1 -i %i -o virbr0 -j ACCEPT; iptables -I FORWARD 1 -i virbr0 -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -t nat -A POSTROUTING -s 10.0.100.0/24 -o virbr0 -j MASQUERADE
 
-# 1. Al arrancar (PostUp):
-# - Activamos el reenvío de IPs (ip_forward).
-# - Insertamos (-I) las reglas de paso entre el túnel (%i) y las VMs (virbr0) ARRIBA DEL TODO.
-# - Activamos el NAT (Masquerade) para que salgan a internet por eth0 si hace falta.
-PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -I FORWARD 1 -i %i -o virbr0 -j ACCEPT; iptables -I FORWARD 1 -i virbr0 -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+# Cleanup on shutdown (Exact reverse of PostUp)
+PostDown = iptables -D FORWARD -i %i -o virbr0 -j ACCEPT; iptables -D FORWARD -i virbr0 -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE; iptables -t nat -D POSTROUTING -s 10.0.100.0/24 -o virbr0 -j MASQUERADE
 
-# 2. Al apagar (PostDown):
-# - Borramos (-D) exactamente las mismas reglas para dejar el sistema limpio.
-PostDown = iptables -D FORWARD -i %i -o virbr0 -j ACCEPT; iptables -D FORWARD -i virbr0 -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
-
-
-# Strato
 [Peer]
-PublicKey = PublicKey
-PresharedKey = PresharedKey
-Endpoint = PUBLIC:51821
+# VPS Strato connection details
+PublicKey = <Public_Key_VPS>
+PresharedKey = <Preshared_Key>
+Endpoint = 87.106.XXX.XXX:51821
 AllowedIPs = 10.0.100.0/24
 PersistentKeepalive = 25
-
-
-# Windows 11
-[Peer]
-PublicKey = PublicKey
-PresharedKey = PresharedKey
-AllowedIPs = 10.0.100.3/32
 ```
 
 -----
 
-## 💻 Virtual Machines (VMs)
+## 📦 Node 3: Pterodactyl VM
 
-### 📦 Pterodactyl VM
+**Role:** Game Server Host (Docker)
+**IP:** `10.0.200.2` (Static IP assigned by Unraid)
 
-  * **Method:** Old / Legacy (`wg0`)
-  * **Connection:** Connects directly to VPS `wg0`.
+**The Problem:** Docker manages its own firewall (`iptables`). When traffic comes from a "strange" network (like our VPN), Docker often blocks it or misroutes the response, leading to "Connection Refused" even if the server is running.
 
-### 💳 Paymenter VM
+**The Solution:** The **Localhost Mirror**. We run a script that catches incoming packets and rewrites them to target `127.0.0.1`. Docker *always* accepts traffic from Localhost.
 
-  * **Method:** **New / Hub-and-Spoke** (`wg1`)
-  * **IP Address:** `10.0.200.2`
-  * **Gateway:** `10.0.200.1` (Unraid)
-  * **Route:** Traffic goes Unraid -\> Tunnel -\> VPS.
-  * **Note:** This VM acts as if Unraid is its router. It does not need a WireGuard client installed inside the VM itself to reach the VPS, because Unraid handles the routing.
+### 🛠️ Repair Script (`/root/fix_ptero.sh`)
+
+This script forces the networking to work by bypassing Docker's external filters.
+
+```bash
+#!/bin/bash
+# Location: /root/fix_ptero.sh
+
+# Ports to fix (Defaults to 25565-25999 if no argument provided)
+INPUT_RANGE=${1:-"25565:25999"}
+START_PORT=$(echo $INPUT_RANGE | cut -d':' -f1)
+END_PORT=$(echo $INPUT_RANGE | cut -d':' -f2)
+[ -z "$END_PORT" ] && END_PORT=$START_PORT
+
+echo "🔧 Fixing Docker Network for ports: $START_PORT to $END_PORT ..."
+
+# 1. Enable Localhost Routing (MANDATORY)
+# Normally, Linux forbids routing external traffic to 127.0.0.1. We must enable this.
+sysctl -w net.ipv4.conf.all.route_localnet=1 > /dev/null
+
+# 2. NAT Cleanup
+# Remove old rules to prevent conflicts.
+iptables -t nat -F PREROUTING
+iptables -t nat -F POSTROUTING
+
+# 3. MIRROR LOOP (Port by Port)
+for port in $(seq $START_PORT $END_PORT); do
+    # INBOUND (DNAT): 
+    # Catch traffic on external IP -> Send to 127.0.0.1
+    iptables -t nat -A PREROUTING -p tcp --dport $port -j DNAT --to-destination 127.0.0.1:$port
+    iptables -t nat -A PREROUTING -p udp --dport $port -j DNAT --to-destination 127.0.0.1:$port
+
+    # OUTBOUND (SNAT/Hairpin): 
+    # This is the magic fix. When the server replies, we rewrite the packet so it looks
+    # like it came from 127.0.0.1. This ensures the reply goes back through our tunnel
+    # instead of getting lost in the Docker bridge.
+    iptables -t nat -A POSTROUTING -p tcp --dport $port -d 127.0.0.1 -j SNAT --to-source 127.0.0.1
+    iptables -t nat -A POSTROUTING -p udp --dport $port -d 127.0.0.1 -j SNAT --to-source 127.0.0.1
+done
+
+# 4. Internet Access for Docker Containers
+# Allows containers to download updates/plugins from the internet.
+iptables -t nat -A POSTROUTING -s 172.0.0.0/8 ! -d 172.0.0.0/8 -j MASQUERADE
+
+echo "✅ Network fixed."
+```
+
+-----
+
+## 🚦 Web Services (Reverse Proxy)
+
+**Host:** VPS (Strato)
+**Stack:** Caddy + Docker
+
+This handles `http` and `https` traffic (Websites, Panels, Wings API). Unlike the raw game ports, this uses a **Reverse Proxy**. Caddy terminates the connection at the VPS and creates a new request to the internal server.
+
+### `docker-compose.yml`
+
+The crucial setting here is `network_mode: host`.
+
+  * **Standard Docker:** Isolated network. Can't see the WireGuard interface (`wg1`) on the host.
+  * **Host Mode:** Caddy runs as if it were installed directly on the OS. It can see and route traffic to the `10.0.200.x` VPN IPs.
+
+<!-- end list -->
+
+```yaml
+services:
+  caddy:
+    image: caddy:latest
+    restart: unless-stopped
+    network_mode: host  # CRITICAL: Allows Caddy to access 10.0.x.x IPs over WireGuard
+    volumes:
+      - ./conf:/etc/caddy
+      - ./site:/srv
+      - caddy_data:/data
+      - caddy_config:/config
+```
+
+### `conf/Caddyfile`
+
+Maps public subdomains to private VPN IPs.
+
+```text
+# --- PTERODACTYL & WINGS ---
+# Routes traffic from the public web to the VM via the VPN tunnel
+ptero.danicdn.tech {
+    reverse_proxy 10.0.200.2:80
+}
+
+wings.danicdn.tech:8080 {
+    reverse_proxy 10.0.200.2:8080
+}
+
+# --- BILLING (PAYMENTER) ---
+# A different VM on the same internal network (Unraid routed)
+billing.danicdn.tech {
+    reverse_proxy 10.0.200.3:80
+}
+
+# --- REDIRECTS & EXTRAS ---
+# These point to services running on the VPS itself (localhost)
+theblockheads.me {
+    reverse_proxy localhost:15151
+}
+
+join.theblockheads.me {
+    reverse_proxy localhost:9924
+}
+```
