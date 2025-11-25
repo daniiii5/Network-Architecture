@@ -174,8 +174,6 @@ AllowedIPs = 12.0.1.3/32
 
 #### `wg1.conf` (New Unraid Link)
 
-> **English Explanation:**
->
 >   * **Address:** `10.0.100.1` (The new private network for Unraid).
 >   * **ListenPort:** `51821` (Different from wg0 to avoid conflicts).
 >   * **AllowedIPs:** Includes `10.0.200.0/24` — this is crucial. It tells the VPS that to reach the VMs (like Paymenter), it must send traffic through this peer (Unraid).
@@ -438,7 +436,6 @@ Unraid connects to the VPS via `wg1`.
 
 #### `wg_confs/wg0.conf`
 
-> **English Explanation:**
 > This is the client side configuration on Unraid.
 >
 >   * **PostUp Command:**
