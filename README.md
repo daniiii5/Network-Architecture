@@ -18,6 +18,7 @@
       - [B. Dell Laptop "Storm" (`storm.conf`)](#b-dell-laptop-storm-stormconf)
     - [4. Reverse Proxy (`Caddyfile`)](#4-reverse-proxy-caddyfile)
   - [🏗️ Node 2: Unraid (The Core)](#️-node-2-unraid-the-core)
+    - [1. WireGuard Configuration (`Wireguard Docker`)](#1-wireguard-configuration-wireguard-docker)
   - [💻 Node 3: Dell Laptop "Storm" (The Satellite)](#-node-3-dell-laptop-storm-the-satellite)
 
 
@@ -307,6 +308,36 @@ This node is special because it does not just run containers; it bridges a conne
 2.  **Routing:** Unraid forwards this to the VM bridge (`virbr0` -\> `10.0.200.2`).
 3.  **VM Handling:** The VM runs the **Pterodactyl Panel** and the **Main Wings** instance.
 4.  **Fix Script:** A script inside the VM (`fix_ptero.sh`) is required to trick Docker into accepting forwarded traffic by rewriting it as `localhost` traffic.
+
+### 1\. WireGuard Configuration (`Wireguard Docker`)
+
+*Location: `/.../Wireguard-Docker/wg0.conf`*
+```conf
+[Interface]
+Address = 10.0.100.2/24
+PrivateKey = PrivateKey
+ListenPort = 51821
+
+# He quitado el "sysctl..." del principio. Solo IPTABLES.
+PostUp = iptables -I FORWARD 1 -i %i -o virbr0 -j ACCEPT; iptables -I FORWARD 1 -i virbr0 -o %i -j ACCEPT; iptables -t nat -I POSTROUTING 1 -o virbr0 -j MASQU>
+
+PostDown = iptables -D FORWARD -i %i -o virbr0 -j ACCEPT; iptables -D FORWARD -i virbr0 -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o virbr0 -j MASQUERAD>
+
+# Strato
+[Peer]
+PublicKey = PublicKey
+PresharedKey = PresharedKey
+Endpoint = Endpoint:51821
+AllowedIPs = 10.0.100.1/32
+PersistentKeepalive = 25
+
+# Windows 11
+[Peer]
+PublicKey = PublicKey
+PresharedKey = PresharedKey
+AllowedIPs = 10.0.100.3/32
+```
+
 
 -----
 
